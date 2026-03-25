@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="ext_session_lock_v1">
+  <copyright>
+    Copyright 2021 Isaac Freund
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <interface name="ext_session_lock_manager_v1" version="1">
+    <description summary="used to lock the session">
+      This interface is used to request that the session be locked.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the session lock manager">
+        Destroy the session lock manager. Existing locks continue.
+      </description>
+    </request>
+
+    <request name="lock">
+      <description summary="attempt to lock the session">
+        Attempt to lock the session. The compositor sends the locked event
+        on success, or finished on failure.
+      </description>
+      <arg name="id" type="new_id" interface="ext_session_lock_v1"/>
+    </request>
+  </interface>
+
+  <interface name="ext_session_lock_v1" version="1">
+    <description summary="manage lock state and lock surfaces">
+      On creation the compositor attempts to lock the session. The client
+      must create lock surfaces for all outputs and render to them before
+      the compositor sends the locked event.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the session lock">
+        Destroy the session lock. Only usable after finished event.
+      </description>
+    </request>
+
+    <request name="get_lock_surface">
+      <description summary="create a lock surface for an output">
+        Create a lock surface for the given output. The surface must be
+        committed with a buffer before the locked event is sent.
+      </description>
+      <arg name="id" type="new_id" interface="ext_session_lock_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="unlock_and_destroy" type="destructor">
+      <description summary="unlock the session and destroy">
+        Unlock the session. Only valid after locked event.
+      </description>
+    </request>
+
+    <event name="locked">
+      <description summary="session successfully locked">
+        The session is now locked. The compositor will not show other
+        surfaces until unlock_and_destroy is called.
+      </description>
+    </event>
+
+    <event name="finished">
+      <description summary="the session lock object should be destroyed">
+        The lock has been destroyed or the session lock failed. The client
+        should destroy this object.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="ext_session_lock_surface_v1" version="1">
+    <description summary="a lock surface for a given output">
+      A surface displayed on an output while the session is locked.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the lock surface">
+        Destroy the lock surface.
+      </description>
+    </request>
+
+    <request name="ack_configure">
+      <description summary="ack a configure event">
+        Acknowledge the configure event. Must be acked before commit.
+      </description>
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <event name="configure">
+      <description summary="suggest a surface change">
+        Compositor suggests a new size for the surface.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+  </interface>
+</protocol>
