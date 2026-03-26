@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlr_output_power_management_unstable_v1">
+  <copyright>
+    Copyright 2019 Purism SPC
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <interface name="zwlr_output_power_manager_v1" version="1">
+    <description summary="manager to create per-output power management">
+      This interface is a manager that allows creating per-output power
+      management mode objects.
+    </description>
+
+    <request name="get_output_power">
+      <description summary="get a power management mode object for an output">
+        Create an output power management mode object.
+      </description>
+      <arg name="id" type="new_id" interface="zwlr_output_power_v1"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        All objects created by the manager will still remain valid.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="zwlr_output_power_v1" version="1">
+    <description summary="adjust power management mode for an output">
+      This object offers requests to set the power management mode of
+      an output.
+    </description>
+
+    <enum name="mode">
+      <entry name="off" value="0" summary="output is turned off"/>
+      <entry name="on" value="1" summary="output is turned on"/>
+    </enum>
+
+    <request name="set_mode">
+      <description summary="set the power mode">
+        Set an output's power mode.
+      </description>
+      <arg name="mode" type="uint" enum="mode"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this power management object">
+        Destroys the power management mode object.
+      </description>
+    </request>
+
+    <event name="mode">
+      <description summary="report a power management mode change">
+        Report the power management mode change of an output.
+      </description>
+      <arg name="mode" type="uint" enum="mode"/>
+    </event>
+
+    <event name="failed">
+      <description summary="object no longer valid">
+        This event indicates that the output power management mode object
+        is no longer valid.
+      </description>
+    </event>
+  </interface>
+</protocol>

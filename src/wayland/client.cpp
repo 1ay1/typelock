@@ -113,7 +113,9 @@ static void kb_modifiers(void* data, wl_keyboard*, uint32_t serial,
                                                           latched, locked, group);
 }
 
-static void kb_repeat_info(void*, wl_keyboard*, int32_t, int32_t) {}
+static void kb_repeat_info(void* data, wl_keyboard*, int32_t rate, int32_t delay) {
+    static_cast<Client*>(data)->handle_keyboard_repeat_info(rate, delay);
+}
 
 static const wl_keyboard_listener kb_listener = {
     .keymap      = kb_keymap,
@@ -132,6 +134,47 @@ static void buffer_release(void* data, wl_buffer*) {
 
 static const wl_buffer_listener buffer_listener = {
     .release = buffer_release,
+};
+
+// -- Screencopy frame --
+
+static void frame_buffer(void* data, zwlr_screencopy_frame_v1* frame,
+                         uint32_t format, uint32_t w, uint32_t h, uint32_t stride) {
+    static_cast<Client*>(data)->handle_frame_buffer(frame, format, w, h, stride);
+}
+
+static void frame_flags(void*, zwlr_screencopy_frame_v1*, uint32_t) {}
+
+static void frame_ready(void* data, zwlr_screencopy_frame_v1* frame,
+                        uint32_t, uint32_t, uint32_t) {
+    static_cast<Client*>(data)->handle_frame_ready(frame);
+}
+
+static void frame_failed(void* data, zwlr_screencopy_frame_v1* frame) {
+    static_cast<Client*>(data)->handle_frame_failed(frame);
+}
+
+static void frame_linux_dmabuf(void*, zwlr_screencopy_frame_v1*, uint32_t,
+                               uint32_t, uint32_t) {}
+static void frame_buffer_done(void*, zwlr_screencopy_frame_v1*) {}
+
+static const zwlr_screencopy_frame_v1_listener frame_listener = {
+    .buffer      = frame_buffer,
+    .flags       = frame_flags,
+    .ready       = frame_ready,
+    .failed      = frame_failed,
+    .linux_dmabuf = frame_linux_dmabuf,
+    .buffer_done = frame_buffer_done,
+};
+
+// -- Output power --
+
+static void output_power_mode(void*, zwlr_output_power_v1*, uint32_t) {}
+static void output_power_failed(void*, zwlr_output_power_v1*) {}
+
+static const zwlr_output_power_v1_listener output_power_listener = {
+    .mode   = output_power_mode,
+    .failed = output_power_failed,
 };
 
 // ============================================================================
@@ -154,17 +197,22 @@ Client::~Client() {
         if (ls.surface)   wl_surface_destroy(ls.surface);
     }
 
-    if (lock_)         ext_session_lock_v1_destroy(lock_);
-    if (lock_manager_) ext_session_lock_manager_v1_destroy(lock_manager_);
-    if (keyboard_)     wl_keyboard_destroy(keyboard_);
-    if (seat_)         wl_seat_destroy(seat_);
-    if (shm_)          wl_shm_destroy(shm_);
-    if (compositor_)   wl_compositor_destroy(compositor_);
+    if (lock_)          ext_session_lock_v1_destroy(lock_);
+    if (lock_manager_)  ext_session_lock_manager_v1_destroy(lock_manager_);
+    if (keyboard_)      wl_keyboard_destroy(keyboard_);
+    if (seat_)          wl_seat_destroy(seat_);
+    if (shm_)           wl_shm_destroy(shm_);
+    if (compositor_)    wl_compositor_destroy(compositor_);
+
     for (auto& o : outputs_) {
+        if (o.power)  zwlr_output_power_v1_destroy(o.power);
         if (o.output) wl_output_destroy(o.output);
     }
-    if (registry_)     wl_registry_destroy(registry_);
-    if (display_)      wl_display_disconnect(display_);
+
+    if (screencopy_)    zwlr_screencopy_manager_v1_destroy(screencopy_);
+    if (power_manager_) zwlr_output_power_manager_v1_destroy(power_manager_);
+    if (registry_)      wl_registry_destroy(registry_);
+    if (display_)       wl_display_disconnect(display_);
 }
 
 bool Client::connect() {
@@ -174,13 +222,20 @@ bool Client::connect() {
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &registry_listener, this);
 
-    // Round-trip to get globals
     wl_display_roundtrip(display_);
-    // Second round-trip for output modes
     wl_display_roundtrip(display_);
 
-    if (!compositor_ || !shm_ || !seat_ || !lock_manager_) {
+    if (!compositor_ || !shm_ || !seat_ || !lock_manager_)
         return false;
+
+    // Set up DPMS power objects for each output if manager is available
+    if (power_manager_) {
+        for (auto& o : outputs_) {
+            o.power = zwlr_output_power_manager_v1_get_output_power(
+                power_manager_, o.output);
+            zwlr_output_power_v1_add_listener(o.power, &output_power_listener, this);
+        }
+        wl_display_roundtrip(display_);
     }
 
     return true;
@@ -192,15 +247,13 @@ bool Client::lock_session() {
 
     ext_session_lock_v1_add_listener(lock_, &lock_listener, this);
 
-    // Create a lock surface for each output
     for (auto& output : outputs_) {
         LockSurface ls;
-        ls.output   = &output;
-        ls.surface  = wl_compositor_create_surface(compositor_);
+        ls.output    = &output;
+        ls.surface   = wl_compositor_create_surface(compositor_);
         ls.lock_surf = ext_session_lock_v1_get_lock_surface(lock_, ls.surface, output.output);
 
         ext_session_lock_surface_v1_add_listener(ls.lock_surf, &lock_surface_listener, this);
-
         lock_surfaces_.push_back(std::move(ls));
     }
 
@@ -231,6 +284,10 @@ int Client::dispatch() {
     return wl_display_dispatch(display_);
 }
 
+int Client::dispatch_pending() {
+    return wl_display_dispatch_pending(display_);
+}
+
 void Client::flush() {
     wl_display_flush(display_);
 }
@@ -242,8 +299,7 @@ int Client::get_fd() const {
 // -- Shared memory buffer --
 
 static int create_shm_file(size_t size) {
-    const char* name = "/typelock-shm-XXXXXX";
-    int fd = memfd_create(name, MFD_CLOEXEC);
+    int fd = memfd_create("typelock-shm", MFD_CLOEXEC);
     if (fd < 0) return -1;
     if (ftruncate(fd, static_cast<off_t>(size)) < 0) {
         close(fd);
@@ -287,11 +343,115 @@ void Client::attach_buffer(LockSurface& surf, ShmBuffer& buf) {
     buf.busy = true;
 }
 
+// -- Screencopy --
+
+auto Client::capture_outputs() -> std::vector<Screenshot> {
+    std::vector<Screenshot> shots;
+
+    if (!screencopy_)
+        return shots;
+
+    for (auto& output : outputs_) {
+        if (output.width <= 0 || output.height <= 0)
+            continue;
+
+        FrameCapture capture;
+        active_capture_ = &capture;
+
+        auto* frame = zwlr_screencopy_manager_v1_capture_output(
+            screencopy_, 0, output.output);
+        zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, this);
+
+        // Wait for buffer event
+        while (!capture.width && !capture.failed)
+            wl_display_roundtrip(display_);
+
+        if (capture.failed || !capture.width) {
+            zwlr_screencopy_frame_v1_destroy(frame);
+            active_capture_ = nullptr;
+            continue;
+        }
+
+        // Create buffer matching the requested format
+        capture.buf = create_shm_buffer(
+            static_cast<int32_t>(capture.width),
+            static_cast<int32_t>(capture.height));
+
+        if (!capture.buf.data) {
+            zwlr_screencopy_frame_v1_destroy(frame);
+            active_capture_ = nullptr;
+            continue;
+        }
+
+        // Copy frame
+        zwlr_screencopy_frame_v1_copy(frame, capture.buf.buffer);
+
+        // Wait for ready
+        while (!capture.ready && !capture.failed)
+            wl_display_roundtrip(display_);
+
+        if (capture.ready && capture.buf.data) {
+            // Create cairo surface from captured data
+            auto* surface = cairo_image_surface_create_for_data(
+                static_cast<unsigned char*>(capture.buf.data),
+                CAIRO_FORMAT_ARGB32,
+                static_cast<int>(capture.width),
+                static_cast<int>(capture.height),
+                static_cast<int>(capture.stride));
+
+            // Copy to owned surface (the shm buffer will be freed)
+            auto* owned = cairo_image_surface_create(
+                CAIRO_FORMAT_ARGB32,
+                static_cast<int>(capture.width),
+                static_cast<int>(capture.height));
+            auto* cr = cairo_create(owned);
+            cairo_set_source_surface(cr, surface, 0, 0);
+            cairo_paint(cr);
+            cairo_destroy(cr);
+            cairo_surface_destroy(surface);
+
+            shots.push_back({
+                .surface = owned,
+                .width   = static_cast<int32_t>(capture.width),
+                .height  = static_cast<int32_t>(capture.height),
+            });
+        }
+
+        // Clean up shm buffer
+        if (capture.buf.data) {
+            munmap(capture.buf.data, capture.buf.size);
+        }
+        if (capture.buf.buffer) wl_buffer_destroy(capture.buf.buffer);
+        if (capture.buf.fd >= 0) close(capture.buf.fd);
+
+        zwlr_screencopy_frame_v1_destroy(frame);
+        active_capture_ = nullptr;
+    }
+
+    return shots;
+}
+
+// -- DPMS --
+
+void Client::set_dpms(bool on) {
+    if (!power_manager_) return;
+
+    uint32_t mode = on ? ZWLR_OUTPUT_POWER_V1_MODE_ON
+                       : ZWLR_OUTPUT_POWER_V1_MODE_OFF;
+
+    for (auto& o : outputs_) {
+        if (o.power)
+            zwlr_output_power_v1_set_mode(o.power, mode);
+    }
+    flush();
+}
+
 // ============================================================================
 // Event handlers
 // ============================================================================
 
-void Client::handle_registry_global(uint32_t name, const char* interface, [[maybe_unused]] uint32_t version) {
+void Client::handle_registry_global(uint32_t name, const char* interface,
+                                     [[maybe_unused]] uint32_t version) {
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         compositor_ = static_cast<wl_compositor*>(
             wl_registry_bind(registry_, name, &wl_compositor_interface, 4));
@@ -300,7 +460,7 @@ void Client::handle_registry_global(uint32_t name, const char* interface, [[mayb
             wl_registry_bind(registry_, name, &wl_shm_interface, 1));
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         seat_ = static_cast<wl_seat*>(
-            wl_registry_bind(registry_, name, &wl_seat_interface, 5));
+            wl_registry_bind(registry_, name, &wl_seat_interface, 7));
         wl_seat_add_listener(seat_, &seat_listener_def, this);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
         auto* out = static_cast<wl_output*>(
@@ -313,11 +473,16 @@ void Client::handle_registry_global(uint32_t name, const char* interface, [[mayb
     } else if (strcmp(interface, ext_session_lock_manager_v1_interface.name) == 0) {
         lock_manager_ = static_cast<ext_session_lock_manager_v1*>(
             wl_registry_bind(registry_, name, &ext_session_lock_manager_v1_interface, 1));
+    } else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
+        screencopy_ = static_cast<zwlr_screencopy_manager_v1*>(
+            wl_registry_bind(registry_, name, &zwlr_screencopy_manager_v1_interface, 3));
+    } else if (strcmp(interface, zwlr_output_power_manager_v1_interface.name) == 0) {
+        power_manager_ = static_cast<zwlr_output_power_manager_v1*>(
+            wl_registry_bind(registry_, name, &zwlr_output_power_manager_v1_interface, 1));
     }
 }
 
 void Client::handle_registry_remove(uint32_t name) {
-    // Handle output removal if needed
     (void)name;
 }
 
@@ -397,16 +562,13 @@ void Client::handle_keyboard_key(uint32_t, uint32_t, uint32_t key, uint32_t stat
     if (state != WL_KEYBOARD_KEY_STATE_PRESSED || !xkb_state_)
         return;
 
-    // evdev offset
     uint32_t keycode = key + 8;
     xkb_keysym_t sym = xkb_state_key_get_one_sym(xkb_state_, keycode);
 
-    // Get UTF-32 codepoint
     char32_t codepoint = 0;
     char buf[8];
     int len = xkb_state_key_get_utf8(xkb_state_, keycode, buf, sizeof(buf));
     if (len > 0 && len <= 4) {
-        // Decode first UTF-8 character to UTF-32
         auto* u = reinterpret_cast<unsigned char*>(buf);
         if (u[0] < 0x80)      codepoint = u[0];
         else if (u[0] < 0xE0) codepoint = ((u[0] & 0x1F) << 6) | (u[1] & 0x3F);
@@ -423,6 +585,33 @@ void Client::handle_keyboard_modifiers(uint32_t, uint32_t depressed,
                                         uint32_t group) {
     if (xkb_state_)
         xkb_state_update_mask(xkb_state_, depressed, latched, locked, 0, 0, group);
+}
+
+void Client::handle_keyboard_repeat_info(int32_t rate, int32_t delay) {
+    repeat_rate_  = rate;
+    repeat_delay_ = delay;
+}
+
+// -- Screencopy frame handlers --
+
+void Client::handle_frame_buffer(zwlr_screencopy_frame_v1*, uint32_t format,
+                                  uint32_t width, uint32_t height, uint32_t stride) {
+    if (active_capture_) {
+        active_capture_->format = format;
+        active_capture_->width  = width;
+        active_capture_->height = height;
+        active_capture_->stride = stride;
+    }
+}
+
+void Client::handle_frame_ready(zwlr_screencopy_frame_v1*) {
+    if (active_capture_)
+        active_capture_->ready = true;
+}
+
+void Client::handle_frame_failed(zwlr_screencopy_frame_v1*) {
+    if (active_capture_)
+        active_capture_->failed = true;
 }
 
 }  // namespace typelock::wl

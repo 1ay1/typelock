@@ -1,18 +1,21 @@
 CXX      := g++
+CC       := gcc
 CXXFLAGS := -std=c++23 -Wall -Wextra -Wpedantic -O2
 LDFLAGS  :=
 
 # Dependencies
-WL_CFLAGS  := $(shell pkg-config --cflags wayland-client)
-WL_LIBS    := $(shell pkg-config --libs wayland-client)
+WL_CFLAGS   := $(shell pkg-config --cflags wayland-client)
+WL_LIBS     := $(shell pkg-config --libs wayland-client)
 CAIRO_FLAGS := $(shell pkg-config --cflags pangocairo cairo)
 CAIRO_LIBS  := $(shell pkg-config --libs pangocairo cairo)
 XKB_CFLAGS  := $(shell pkg-config --cflags xkbcommon)
 XKB_LIBS    := $(shell pkg-config --libs xkbcommon)
+SD_CFLAGS   := $(shell pkg-config --cflags libsystemd)
+SD_LIBS     := $(shell pkg-config --libs libsystemd)
 PAM_LIBS    := -lpam
 
-ALL_CFLAGS := $(CXXFLAGS) $(WL_CFLAGS) $(CAIRO_FLAGS) $(XKB_CFLAGS) -Isrc -Ibuild
-ALL_LIBS   := $(WL_LIBS) $(CAIRO_LIBS) $(XKB_LIBS) $(PAM_LIBS) -lpthread
+ALL_CFLAGS := $(CXXFLAGS) $(WL_CFLAGS) $(CAIRO_FLAGS) $(XKB_CFLAGS) $(SD_CFLAGS) -Isrc -Ibuild
+ALL_LIBS   := $(WL_LIBS) $(CAIRO_LIBS) $(XKB_LIBS) $(SD_LIBS) $(PAM_LIBS) -lpthread
 
 # Scanner
 WAYLAND_SCANNER := wayland-scanner
@@ -21,15 +24,21 @@ WAYLAND_SCANNER := wayland-scanner
 SRCS := src/main.cpp \
         src/wayland/client.cpp \
         src/render/renderer.cpp \
-        src/auth/pam.cpp
+        src/render/blur.cpp \
+        src/auth/pam.cpp \
+        src/auth/fingerprint.cpp \
+        src/config/parser.cpp
 
 OBJS := $(patsubst src/%.cpp,build/%.o,$(SRCS))
 
-# Protocol generated files
-PROTO_XML := protocols/ext-session-lock-v1.xml
-PROTO_H   := build/ext-session-lock-v1-client.h
-PROTO_C   := build/ext-session-lock-v1-protocol.c
-PROTO_O   := build/ext-session-lock-v1-protocol.o
+# Protocol files
+PROTOCOLS := ext-session-lock-v1 \
+             wlr-screencopy-unstable-v1 \
+             wlr-output-power-management-unstable-v1
+
+PROTO_HEADERS := $(patsubst %,build/%-client.h,$(PROTOCOLS))
+PROTO_SOURCES := $(patsubst %,build/%-protocol.c,$(PROTOCOLS))
+PROTO_OBJS    := $(patsubst %,build/%-protocol.o,$(PROTOCOLS))
 
 TARGET := build/typelock
 
@@ -37,21 +46,23 @@ TARGET := build/typelock
 
 all: $(TARGET)
 
-$(TARGET): $(PROTO_O) $(OBJS)
+$(TARGET): $(PROTO_OBJS) $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(ALL_LIBS)
 
-# Protocol generation
-$(PROTO_H): $(PROTO_XML)
+# Protocol generation (pattern rules)
+build/%-client.h: protocols/%.xml
+	@mkdir -p $(dir $@)
 	$(WAYLAND_SCANNER) client-header $< $@
 
-$(PROTO_C): $(PROTO_XML)
+build/%-protocol.c: protocols/%.xml
+	@mkdir -p $(dir $@)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-$(PROTO_O): $(PROTO_C) $(PROTO_H)
+build/%-protocol.o: build/%-protocol.c build/%-client.h
 	$(CC) -c -o $@ $< $(WL_CFLAGS)
 
-# C++ compilation (depends on generated protocol header)
-build/%.o: src/%.cpp $(PROTO_H)
+# C++ compilation (depends on all generated protocol headers)
+build/%.o: src/%.cpp $(PROTO_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(ALL_CFLAGS) -c -o $@ $<
 

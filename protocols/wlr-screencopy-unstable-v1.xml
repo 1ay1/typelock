@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlr_screencopy_unstable_v1">
+  <copyright>
+    Copyright 2018 Simon Ser
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <interface name="zwlr_screencopy_manager_v1" version="3">
+    <description summary="manager to inform clients and begin capturing">
+      This object is a manager which offers requests to start capturing
+      from a source.
+    </description>
+
+    <request name="capture_output">
+      <description summary="capture an output">
+        Capture the next frame of an entire output.
+      </description>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="capture_output_region" since="1">
+      <description summary="capture an output region">
+        Capture the next frame of a region of an output.
+      </description>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        All objects created by the manager will still remain valid, until
+        their appropriate destroy request has been called.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="zwlr_screencopy_frame_v1" version="3">
+    <description summary="a]n object representing a single frame">
+      This object represents a single frame.
+    </description>
+
+    <event name="buffer">
+      <description summary="buffer information">
+        Provides information about the frame's buffer. This event is sent
+        once as soon as the frame is created.
+      </description>
+      <arg name="format" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="stride" type="uint"/>
+    </event>
+
+    <event name="flags">
+      <description summary="frame flags">
+        Provides flags about the frame. This event is sent once before
+        the ready event.
+      </description>
+      <arg name="flags" type="uint"/>
+    </event>
+
+    <event name="ready">
+      <description summary="indicates frame is available for reading">
+        Called as soon as the frame is presented, indicating it is
+        available for reading.
+      </description>
+      <arg name="tv_sec_hi" type="uint"/>
+      <arg name="tv_sec_lo" type="uint"/>
+      <arg name="tv_nsec" type="uint"/>
+    </event>
+
+    <event name="failed">
+      <description summary="frame copy failed">
+        This event indicates that the attempted frame copy has failed.
+      </description>
+    </event>
+
+    <request name="copy">
+      <description summary="copy the frame">
+        Copy the frame to the supplied buffer.
+      </description>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="delete this object">
+        Destroys the frame.
+      </description>
+    </request>
+
+    <event name="linux_dmabuf" since="3">
+      <description summary="linux-dmabuf buffer information">
+        Provides information about the linux-dmabuf frame's buffer.
+      </description>
+      <arg name="format" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="buffer_done" since="3">
+      <description summary="all buffer types reported">
+        This event is sent once after all buffer events have been sent.
+      </description>
+    </event>
+
+    <request name="copy_with_damage" since="3">
+      <description summary="copy the frame with damage">
+        Same as copy, except the
+
+
+
+
+        compositor should only
+        copy the damaged region since the last frame.
+      </description>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+  </interface>
+</protocol>

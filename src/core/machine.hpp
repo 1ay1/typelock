@@ -12,13 +12,11 @@ namespace typelock {
 //  Meta — compile-time type-level machinery
 // ============================================================================
 
-// Type list — the fundamental compile-time container
 template <typename... Ts>
 struct type_list {
     static constexpr std::size_t size = sizeof...(Ts);
 };
 
-// Check if a type list contains a type
 template <typename List, typename T>
 struct contains : std::false_type {};
 
@@ -31,7 +29,6 @@ struct contains<type_list<U, Ts...>, T> : contains<type_list<Ts...>, T> {};
 template <typename List, typename T>
 constexpr bool contains_v = contains<List, T>::value;
 
-// Apply a predicate to each element and count how many match
 template <typename List, template <typename> class Pred>
 struct count_if;
 
@@ -49,7 +46,6 @@ struct count_if<type_list<T, Ts...>, Pred> {
 template <typename List, template <typename> class Pred>
 constexpr std::size_t count_if_v = count_if<List, Pred>::value;
 
-// For-each at compile time — fold over a type list
 template <typename List, typename F>
 constexpr void for_each_type(F&& f) {
     []<typename... Ts>(type_list<Ts...>, F&& fn) {
@@ -57,7 +53,6 @@ constexpr void for_each_type(F&& f) {
     }(List{}, std::forward<F>(f));
 }
 
-// Overloaded visitor — clean std::visit syntax
 template <typename... Fs>
 struct overloaded : Fs... {
     using Fs::operator()...;
@@ -66,11 +61,11 @@ struct overloaded : Fs... {
 // ============================================================================
 //  States — each type is a proposition; its values are proofs
 //
-//  Idle            — the screen is locked, no input yet
-//  Typing          — user is entering a password (buffer is non-empty)
-//  Authenticating  — PAM is checking the password (password is non-empty)
-//  Unlocked        — authentication succeeded (terminal state)
-//  AuthError       — authentication failed, showing error message
+//  Idle            — locked screen, awaiting first input
+//  Typing          — password entry in progress (buffer non-empty)
+//  Authenticating  — PAM is verifying (password non-empty)
+//  Unlocked        — terminal: authentication succeeded
+//  AuthError       — authentication failed, showing error
 // ============================================================================
 
 struct Idle {
@@ -101,6 +96,8 @@ concept IsState = contains_v<States, S>;
 
 // ============================================================================
 //  Events — inputs to the state machine
+//
+//  Now includes fingerprint events for biometric auth path.
 // ============================================================================
 
 struct KeyPress {
@@ -116,9 +113,13 @@ struct AuthFail {
 };
 
 struct Timeout {};
+struct FingerprintMatch {};
+struct FingerprintNoMatch {};
 
-using Events = type_list<KeyPress, Backspace, Submit, AuthSuccess, AuthFail, Timeout>;
-using Event  = std::variant<KeyPress, Backspace, Submit, AuthSuccess, AuthFail, Timeout>;
+using Events = type_list<KeyPress, Backspace, Submit, AuthSuccess, AuthFail,
+                         Timeout, FingerprintMatch, FingerprintNoMatch>;
+using Event  = std::variant<KeyPress, Backspace, Submit, AuthSuccess, AuthFail,
+                            Timeout, FingerprintMatch, FingerprintNoMatch>;
 
 template <typename E>
 concept IsEvent = contains_v<Events, E>;
@@ -147,15 +148,6 @@ struct TransitionResult {
 
 // ============================================================================
 //  Transition — compile-time transition table via template specialization
-//
-//  The primary template defines the "no transition" case.
-//  Each specialization is an arrow in the state diagram:
-//
-//      Transition<S, E>::valid   = true   iff  S --E--> _ exists
-//      Transition<S, E>::apply() = the transition function
-//
-//  An undefined transition is a type error at compile time when accessed
-//  through the ValidTransition concept.
 // ============================================================================
 
 template <IsState S, IsEvent E>
@@ -169,13 +161,6 @@ concept ValidTransition =
     IsEvent<std::decay_t<E>> &&
     Transition<std::decay_t<S>, std::decay_t<E>>::valid;
 
-// ============================================================================
-//  Transition rule — a reified type-level arrow: From --Event--> To
-//
-//  Used to build a declarative transition table as a type list, enabling
-//  compile-time graph analysis (determinism, reachability, terminal states).
-// ============================================================================
-
 template <IsState From, IsEvent On, IsState To>
 struct rule {
     using from  = From;
@@ -184,10 +169,10 @@ struct rule {
 };
 
 // ============================================================================
-//  Transition implementations
+//  Transition implementations — password auth path
 // ============================================================================
 
-// --- Idle + KeyPress --> Typing ---
+// Idle + KeyPress --> Typing
 template <>
 struct Transition<Idle, KeyPress> {
     static constexpr bool valid = true;
@@ -199,7 +184,7 @@ struct Transition<Idle, KeyPress> {
     }
 };
 
-// --- Typing + KeyPress --> Typing ---
+// Typing + KeyPress --> Typing
 template <>
 struct Transition<Typing, KeyPress> {
     static constexpr bool valid = true;
@@ -211,7 +196,7 @@ struct Transition<Typing, KeyPress> {
     }
 };
 
-// --- Typing + Backspace --> Typing | Idle ---
+// Typing + Backspace --> Typing | Idle
 template <>
 struct Transition<Typing, Backspace> {
     static constexpr bool valid = true;
@@ -224,7 +209,7 @@ struct Transition<Typing, Backspace> {
     }
 };
 
-// --- Typing + Submit --> Authenticating  (effect: StartAuth) ---
+// Typing + Submit --> Authenticating (effect: StartAuth)
 template <>
 struct Transition<Typing, Submit> {
     static constexpr bool valid = true;
@@ -233,7 +218,7 @@ struct Transition<Typing, Submit> {
     }
 };
 
-// --- Authenticating + AuthSuccess --> Unlocked  (effect: ExitProgram) ---
+// Authenticating + AuthSuccess --> Unlocked (effect: ExitProgram)
 template <>
 struct Transition<Authenticating, AuthSuccess> {
     static constexpr bool valid = true;
@@ -242,7 +227,7 @@ struct Transition<Authenticating, AuthSuccess> {
     }
 };
 
-// --- Authenticating + AuthFail --> AuthError ---
+// Authenticating + AuthFail --> AuthError
 template <>
 struct Transition<Authenticating, AuthFail> {
     static constexpr bool valid = true;
@@ -251,7 +236,7 @@ struct Transition<Authenticating, AuthFail> {
     }
 };
 
-// --- AuthError + KeyPress --> Typing (start over) ---
+// AuthError + KeyPress --> Typing (start over)
 template <>
 struct Transition<AuthError, KeyPress> {
     static constexpr bool valid = true;
@@ -263,7 +248,7 @@ struct Transition<AuthError, KeyPress> {
     }
 };
 
-// --- AuthError + Timeout --> Idle ---
+// AuthError + Timeout --> Idle
 template <>
 struct Transition<AuthError, Timeout> {
     static constexpr bool valid = true;
@@ -273,34 +258,96 @@ struct Transition<AuthError, Timeout> {
 };
 
 // ============================================================================
-//  Declarative transition table — the state diagram as a type
+//  Transition implementations — fingerprint auth path
 //
-//      Idle ----KeyPress----> Typing
-//      Typing --KeyPress----> Typing
-//      Typing --Backspace---> Typing (or Idle at runtime)
-//      Typing --Submit------> Authenticating
-//      Auth   --AuthSuccess-> Unlocked       [terminal]
-//      Auth   --AuthFail----> AuthError
-//      Error  --KeyPress----> Typing
-//      Error  --Timeout-----> Idle
+//  Fingerprint is a parallel authentication channel. A successful scan
+//  from any non-terminal state transitions directly to Unlocked.
+//  A failed scan shows an error without losing typed password.
+// ============================================================================
+
+// Idle + FingerprintMatch --> Unlocked (effect: ExitProgram)
+template <>
+struct Transition<Idle, FingerprintMatch> {
+    static constexpr bool valid = true;
+    static auto apply(const Idle&, const FingerprintMatch&) -> TransitionResult {
+        return {Unlocked{}, ExitProgram{}};
+    }
+};
+
+// Typing + FingerprintMatch --> Unlocked (effect: ExitProgram)
+template <>
+struct Transition<Typing, FingerprintMatch> {
+    static constexpr bool valid = true;
+    static auto apply(const Typing&, const FingerprintMatch&) -> TransitionResult {
+        return {Unlocked{}, ExitProgram{}};
+    }
+};
+
+// AuthError + FingerprintMatch --> Unlocked (effect: ExitProgram)
+template <>
+struct Transition<AuthError, FingerprintMatch> {
+    static constexpr bool valid = true;
+    static auto apply(const AuthError&, const FingerprintMatch&) -> TransitionResult {
+        return {Unlocked{}, ExitProgram{}};
+    }
+};
+
+// Idle + FingerprintNoMatch --> AuthError
+template <>
+struct Transition<Idle, FingerprintNoMatch> {
+    static constexpr bool valid = true;
+    static auto apply(const Idle&, const FingerprintNoMatch&) -> TransitionResult {
+        return {AuthError{"Fingerprint not recognized"}, NoEffect{}};
+    }
+};
+
+// AuthError + FingerprintNoMatch --> AuthError (update message)
+template <>
+struct Transition<AuthError, FingerprintNoMatch> {
+    static constexpr bool valid = true;
+    static auto apply(const AuthError&, const FingerprintNoMatch&) -> TransitionResult {
+        return {AuthError{"Fingerprint not recognized"}, NoEffect{}};
+    }
+};
+
+// ============================================================================
+//  Declarative transition table — the complete state diagram as a type
+//
+//      Idle ----KeyPress-----------> Typing
+//      Idle ----FingerprintMatch---> Unlocked         [biometric]
+//      Idle ----FingerprintNoMatch-> AuthError         [biometric]
+//      Typing --KeyPress-----------> Typing
+//      Typing --Backspace----------> Typing (or Idle)
+//      Typing --Submit-------------> Authenticating
+//      Typing --FingerprintMatch---> Unlocked          [biometric]
+//      Auth   --AuthSuccess--------> Unlocked          [terminal]
+//      Auth   --AuthFail-----------> AuthError
+//      Error  --KeyPress-----------> Typing
+//      Error  --Timeout------------> Idle
+//      Error  --FingerprintMatch---> Unlocked          [biometric]
+//      Error  --FingerprintNoMatch-> AuthError         [biometric]
 // ============================================================================
 
 using TransitionTable = type_list<
-    rule<Idle,           KeyPress,    Typing>,
-    rule<Typing,         KeyPress,    Typing>,
-    rule<Typing,         Backspace,   Typing>,       // or Idle — runtime decision
-    rule<Typing,         Submit,      Authenticating>,
-    rule<Authenticating, AuthSuccess, Unlocked>,
-    rule<Authenticating, AuthFail,    AuthError>,
-    rule<AuthError,      KeyPress,    Typing>,
-    rule<AuthError,      Timeout,     Idle>
+    rule<Idle,           KeyPress,           Typing>,
+    rule<Idle,           FingerprintMatch,   Unlocked>,
+    rule<Idle,           FingerprintNoMatch, AuthError>,
+    rule<Typing,         KeyPress,           Typing>,
+    rule<Typing,         Backspace,          Typing>,
+    rule<Typing,         Submit,             Authenticating>,
+    rule<Typing,         FingerprintMatch,   Unlocked>,
+    rule<Authenticating, AuthSuccess,        Unlocked>,
+    rule<Authenticating, AuthFail,           AuthError>,
+    rule<AuthError,      KeyPress,           Typing>,
+    rule<AuthError,      Timeout,            Idle>,
+    rule<AuthError,      FingerprintMatch,   Unlocked>,
+    rule<AuthError,      FingerprintNoMatch, AuthError>
 >;
 
 // ============================================================================
-//  Compile-time graph analysis — the compiler is our theorem prover
+//  Compile-time graph analysis
 // ============================================================================
 
-// --- Count outgoing edges from a state ---
 template <typename Table, typename S>
 struct outgoing_count;
 
@@ -319,7 +366,6 @@ struct outgoing_count<type_list<R, Rs...>, S> {
 template <typename Table, typename S>
 constexpr std::size_t outgoing_v = outgoing_count<Table, S>::value;
 
-// --- Count incoming edges to a state ---
 template <typename Table, typename S>
 struct incoming_count;
 
@@ -338,15 +384,12 @@ struct incoming_count<type_list<R, Rs...>, S> {
 template <typename Table, typename S>
 constexpr std::size_t incoming_v = incoming_count<Table, S>::value;
 
-// --- Terminal state: no outgoing edges ---
 template <typename S>
 concept TerminalState = IsState<S> && (outgoing_v<TransitionTable, S> == 0);
 
-// --- Source state: can be entered only from itself or the start ---
 template <typename S>
 concept InitialState = IsState<S> && std::is_same_v<S, Idle>;
 
-// --- Check that the table matches the specializations ---
 template <typename Table>
 struct table_matches_specializations;
 
@@ -360,7 +403,6 @@ struct table_matches_specializations<type_list<R, Rs...>> {
         table_matches_specializations<type_list<Rs...>>::value;
 };
 
-// --- Determinism: no two rules share (From, Event) ---
 template <typename Table, typename R>
 struct count_matching_rules;
 
@@ -392,47 +434,40 @@ struct is_deterministic<type_list<R, Rs...>> {
 };
 
 // ============================================================================
-//  Compile-time proofs — these are theorems about our state machine
+//  Compile-time proofs
 // ============================================================================
 
-// The transition table is consistent with the specializations
 static_assert(table_matches_specializations<TransitionTable>::value,
     "transition table has a rule with no matching Transition<> specialization");
 
-// The machine is deterministic: each (State, Event) pair has at most one rule
 static_assert(is_deterministic<TransitionTable>::value,
     "transition table is non-deterministic: duplicate (State, Event) pair");
 
-// Unlocked is the only terminal state (no outgoing transitions)
 static_assert(TerminalState<Unlocked>, "Unlocked must be terminal");
 static_assert(!TerminalState<Idle>,    "Idle must not be terminal");
 static_assert(!TerminalState<Typing>,  "Typing must not be terminal");
 
-// Idle is the only initial state (no incoming transitions from the table)
 static_assert(InitialState<Idle>, "Idle must be the initial state");
-static_assert(!InitialState<Typing>, "Typing must not be initial");
 
-// Exact edge counts — change a transition, break a proof
-static_assert(outgoing_v<TransitionTable, Idle>           == 1);
-static_assert(outgoing_v<TransitionTable, Typing>         == 3);
-static_assert(outgoing_v<TransitionTable, Authenticating> == 2);
-static_assert(outgoing_v<TransitionTable, AuthError>      == 2);
+// Edge counts — includes fingerprint paths
+static_assert(outgoing_v<TransitionTable, Idle>           == 3);  // KeyPress, FP+, FP-
+static_assert(outgoing_v<TransitionTable, Typing>         == 4);  // Key, BS, Submit, FP+
+static_assert(outgoing_v<TransitionTable, Authenticating> == 2);  // Success, Fail
+static_assert(outgoing_v<TransitionTable, AuthError>      == 4);  // Key, Timeout, FP+, FP-
 static_assert(outgoing_v<TransitionTable, Unlocked>       == 0);
 
-static_assert(TransitionTable::size == 8, "expected exactly 8 transition rules");
+static_assert(TransitionTable::size == 13, "expected exactly 13 transition rules");
 
-// Forbidden transitions — the compiler rejects these at the type level
-static_assert(!Transition<Idle, Submit>::valid,            "can't submit with nothing typed");
-static_assert(!Transition<Idle, Backspace>::valid,         "nothing to delete");
-static_assert(!Transition<Unlocked, KeyPress>::valid,      "terminal state accepts no input");
-static_assert(!Transition<Authenticating, KeyPress>::valid, "can't type while authenticating");
+// Forbidden transitions
+static_assert(!Transition<Idle, Submit>::valid,              "can't submit empty");
+static_assert(!Transition<Idle, Backspace>::valid,           "nothing to delete");
+static_assert(!Transition<Unlocked, KeyPress>::valid,        "terminal: no input");
+static_assert(!Transition<Unlocked, FingerprintMatch>::valid,"terminal: no input");
+static_assert(!Transition<Authenticating, KeyPress>::valid,  "locked during auth");
+static_assert(!Transition<Typing, FingerprintNoMatch>::valid,"don't lose typed password");
 
 // ============================================================================
-//  Runtime dispatch — the impure boundary
-//
-//  Inside: compile-time validated, total, pure transitions.
-//  Outside: std::variant erases the state type for runtime polymorphism.
-//  The if-constexpr ensures only valid transitions generate code.
+//  Runtime dispatch
 // ============================================================================
 
 inline auto dispatch(const State& current, const Event& event) -> TransitionResult {
@@ -450,40 +485,52 @@ inline auto dispatch(const State& current, const Event& event) -> TransitionResu
 }
 
 // ============================================================================
-//  ViewModel — pure projection:  State -> ViewModel
-//
-//  The renderer never sees raw state. This is a natural transformation
-//  from the State functor to the ViewModel functor — a morphism between
-//  representations that preserves structure.
+//  ViewModel — pure projection: (State, ViewContext) -> ViewModel
 // ============================================================================
+
+struct ViewContext {
+    const char* time_text            = "";
+    const char* date_text            = "";
+    bool        fingerprint_listening = false;
+};
 
 struct ViewModel {
     std::string status_text;
     std::string input_display;
-    bool show_error  = false;
+    std::size_t input_length   = 0;
+    bool        show_error     = false;
     std::string error_text;
+    const char* time_text      = "";
+    const char* date_text      = "";
+    bool        fingerprint_listening = false;
 };
 
-inline auto view(const State& state) -> ViewModel {
-    return std::visit(
+inline auto view(const State& state, const ViewContext& ctx = {}) -> ViewModel {
+    auto vm = std::visit(
         overloaded{
             [](const Idle&) -> ViewModel {
-                return {"Enter password", "", false, ""};
+                return {"Enter password", "", 0, false, "", "", "", false};
             },
             [](const Typing& s) -> ViewModel {
-                return {"Enter password", std::string(s.buffer.size(), '*'), false, ""};
+                return {"Enter password", std::string(s.buffer.size(), '*'),
+                        s.buffer.size(), false, "", "", "", false};
             },
             [](const Authenticating&) -> ViewModel {
-                return {"Authenticating...", "", false, ""};
+                return {"Authenticating...", "", 0, false, "", "", "", false};
             },
             [](const Unlocked&) -> ViewModel {
-                return {"", "", false, ""};
+                return {"", "", 0, false, "", "", "", false};
             },
             [](const AuthError& s) -> ViewModel {
-                return {"Enter password", "", true, s.message};
+                return {"Enter password", "", 0, true, s.message, "", "", false};
             },
         },
         state);
+
+    vm.time_text             = ctx.time_text;
+    vm.date_text             = ctx.date_text;
+    vm.fingerprint_listening = ctx.fingerprint_listening;
+    return vm;
 }
 
 }  // namespace typelock

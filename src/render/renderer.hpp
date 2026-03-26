@@ -2,26 +2,36 @@
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
+#include <vector>
 
+#include "../core/config.hpp"
 #include "../core/machine.hpp"
+#include "../core/widget.hpp"
 #include "../wayland/client.hpp"
 
 namespace typelock::render {
 
 class Renderer {
 public:
-    Renderer();
+    explicit Renderer(const Config& config);
     ~Renderer();
 
     Renderer(const Renderer&)            = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    void draw(wl::ShmBuffer& buf, const ViewModel& vm);
+    void set_backgrounds(std::vector<wl::Screenshot> shots);
+
+    void draw(wl::ShmBuffer& buf, const ViewModel& vm,
+              float opacity, float error_shake, float error_opacity,
+              bool fingerprint_active, int output_index);
 
 private:
-    PangoFontDescription* font_status_ = nullptr;
-    PangoFontDescription* font_input_  = nullptr;
-    PangoFontDescription* font_error_  = nullptr;
+    const Config&                   config_;
+    PangoFontDescription*           font_clock_    = nullptr;
+    PangoFontDescription*           font_date_     = nullptr;
+    PangoFontDescription*           font_label_    = nullptr;
+    PangoFontDescription*           font_error_    = nullptr;
+    std::vector<cairo_surface_t*>   backgrounds_;
 };
 
 }  // namespace typelock::render
