@@ -40,11 +40,28 @@ PROTO_HEADERS := $(patsubst %,build/%-client.h,$(PROTOCOLS))
 PROTO_SOURCES := $(patsubst %,build/%-protocol.c,$(PROTOCOLS))
 PROTO_OBJS    := $(patsubst %,build/%-protocol.o,$(PROTOCOLS))
 
-TARGET := build/typelock
+TARGET      := build/typelock
+TEST_TARGET := build/test_core
 
-.PHONY: all clean install
+TEST_SRCS := tests/main.cpp \
+             tests/test_machine.cpp \
+             tests/test_types.cpp \
+             tests/test_proofs.cpp
+TEST_OBJS := $(patsubst tests/%.cpp,build/tests/%.o,$(TEST_SRCS))
+
+.PHONY: all clean install test
 
 all: $(TARGET)
+
+test: $(TEST_TARGET)
+	@./$(TEST_TARGET)
+
+build/tests/%.o: tests/%.cpp $(wildcard src/core/*.hpp) tests/harness.hpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Isrc -Itests -c -o $@ $<
+
+$(TEST_TARGET): $(TEST_OBJS)
+	$(CXX) $(LDFLAGS) -o $@ $^
 
 $(TARGET): $(PROTO_OBJS) $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(ALL_LIBS)
